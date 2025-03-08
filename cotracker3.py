@@ -21,7 +21,7 @@ class LPF:
     '''
     low pass filter 2d position
     '''
-    def __init__(self, alpha=0.9):
+    def __init__(self, alpha=0.7):
         self.alpha = alpha
         self.prev_pos = None
         
@@ -126,11 +126,14 @@ pred_visibility_all = []
 flow_frames = []
 vorticity_frames = []
 ow_frames = []
+flow_speeds = []
+centers = []
+radii = []
 lps_center = LPF()
 lps_radius = LPF()
 
 for chunk_idx in range(num_chunks):
-    frames = frames_all[chunk_idx * 24 : (chunk_idx + 1) * 24]
+    frames = frames_all[chunk_idx * 24 : (chunk_idx + 1) * 24 + 1]
     video = torch.tensor(frames).permute(0, 3, 1, 2)[None].half().to(device)  # B T C H W
     with torch.no_grad():
         # with torch.amp.autocast(device_type=device, dtype=torch.half):
@@ -167,7 +170,7 @@ for chunk_idx in range(num_chunks):
         # Create a list to store flow color frames
         lpf_factor = 0.3
 
-        for frame_idx in range(frames.shape[0] - 1): 
+        for frame_idx in range(frames.shape[0] - 1):
             frame = frames[frame_idx]
             flow = tracks_np[frame_idx + 1] - tracks_np[frame_idx] # [N, 2] # maybe lpf this
             if frame_idx == 0:
@@ -218,41 +221,64 @@ for chunk_idx in range(num_chunks):
                 center, radius, cluster_coords = find_whirlpool_dbscan(-ow_criterion_clipped, intensity_threshold=dbscan_thres_ow)
             else:
                 center, radius, cluster_coords = find_whirlpool_dbscan(vorticity_clipped, intensity_threshold=dbscan_thres_vorticity)
-            if filter_circle:
-                center = lps_center.update(center)
-                radius = lps_radius.update(radius)
-                
+
             # compute average flow speed in circle
             flow_speed = np.sqrt(flow_x_grid ** 2 + flow_y_grid ** 2)
-            circle_mask = np.zeros_like(flow_speed)
-            cv2.circle(circle_mask, (int(center[1]), int(center[0])), int(radius), (1), -1)
-            circle_mask = circle_mask.astype(np.bool)
-            flow_speed_in_circle = np.mean(flow_speed[circle_mask])
-            print(f"flow speed in circle: {flow_speed_in_circle}")
+            flow_speeds.append(flow_speed)
             
             # draw empty circle on vorticity_clipped
             vorticity_clipped = vorticity_clipped.astype(np.float32)
             vorticity_clipped = (vorticity_clipped - vorticity_clipped.min()) / (vorticity_clipped.max() - vorticity_clipped.min())
             vorticity_clipped = (vorticity_clipped * 255).astype(np.uint8)
-            cv2.circle(vorticity_clipped, (int(center[1]), int(center[0])), int(radius), (0, 0, 255), 2)
             vorticity_frames.append(vorticity_clipped)
             
             # visualize mask on ow_frames
             ow_criterion_clipped = ow_criterion_clipped.astype(np.float32)
             ow_criterion_clipped = (ow_criterion_clipped - ow_criterion_clipped.min()) / (ow_criterion_clipped.max() - ow_criterion_clipped.min())
             ow_criterion_clipped = (ow_criterion_clipped * 255).astype(np.uint8)
-            ow_criterion_clipped[circle_mask] = 1
             ow_frames.append(ow_criterion_clipped)
             
-
+            centers.append(center)
+            radii.append(radius)
             
-            center = center * flow_grid_spacing
-            radius = radius * flow_grid_spacing
-            frame_idx_all = chunk_idx * 24 + frame_idx
-            frames_all[frame_idx_all] = cv2.circle(frames_all[frame_idx_all], (int(center[1]), int(center[0])), int(radius), (0, 0, 255), 2)
+center_mean = np.mean(centers, axis=0)
+radius_mean = np.mean(radii)
+center_std = np.sqrt(np.sum(np.std(centers, axis=0) ** 2))
+radius_std = np.std(radii)
 
-        
-
+last_center = centers[0]
+for frame_idx_all in range(len(centers)):
+    center = centers[frame_idx_all]
+    if np.linalg.norm(center - center_mean) > center_std * 2:
+        print(f"center changed too much at frame {frame_idx_all}, using the last center")
+        center = last_center
+    last_center = center
+    if filter_circle:
+        center = lps_center.update(center)
+        radius = lps_radius.update(radius)
+    else:
+        radius = radius_mean
+    flow_speed = flow_speeds[frame_idx_all]
+    vorticity_clipped = vorticity_frames[frame_idx_all]
+    ow_criterion_clipped = ow_frames[frame_idx_all]
+    
+    circle_mask = np.zeros_like(flow_speed)
+    cv2.circle(circle_mask, (int(center[1]), int(center[0])), int(radius), (1), -1)
+    circle_mask = circle_mask.astype(np.bool)
+    flow_speed_in_circle = np.mean(flow_speed[circle_mask])
+    print(f"flow speed in circle: {flow_speed_in_circle}")
+    
+    
+    # draw circle on vorticity_clipped
+    cv2.circle(vorticity_clipped, (int(center[1]), int(center[0])), int(radius), (0, 0, 255), 2)
+    vorticity_frames[frame_idx_all] = vorticity_clipped
+    # draw circle on ow_criterion_clipped
+    ow_criterion_clipped[circle_mask] = 1
+    ow_frames[frame_idx_all] = ow_criterion_clipped
+    center = center * flow_grid_spacing
+    radius = radius * flow_grid_spacing
+    # frames all
+    frames_all[frame_idx_all] = cv2.circle(frames_all[frame_idx_all], (int(center[1]), int(center[0])), int(radius), (0, 0, 255), 2)
 
 # Convert flow_frames to numpy array and ensure uint8 type
 flow_frames = np.array(flow_frames).astype(np.uint8)
