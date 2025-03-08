@@ -212,7 +212,6 @@ for chunk_idx in range(num_chunks):
                 vorticity_clipped = vorticity
                 ow_criterion_clipped = ow_criterion
             
-            print(vorticity_clipped.shape)
             # find whirlpool
             # center, radius, cluster_coords = find_whirlpool_dbscan(vorticity_clipped)
             if use_ow:
@@ -223,15 +222,29 @@ for chunk_idx in range(num_chunks):
                 center = lps_center.update(center)
                 radius = lps_radius.update(radius)
                 
+            # compute average flow speed in circle
+            flow_speed = np.sqrt(flow_x_grid ** 2 + flow_y_grid ** 2)
+            circle_mask = np.zeros_like(flow_speed)
+            cv2.circle(circle_mask, (int(center[1]), int(center[0])), int(radius), (1), -1)
+            circle_mask = circle_mask.astype(np.bool)
+            flow_speed_in_circle = np.mean(flow_speed[circle_mask])
+            print(f"flow speed in circle: {flow_speed_in_circle}")
             
-            # draw on vorticity_clipped
+            # draw empty circle on vorticity_clipped
             vorticity_clipped = vorticity_clipped.astype(np.float32)
             vorticity_clipped = (vorticity_clipped - vorticity_clipped.min()) / (vorticity_clipped.max() - vorticity_clipped.min())
             vorticity_clipped = (vorticity_clipped * 255).astype(np.uint8)
-            # draw circle
             cv2.circle(vorticity_clipped, (int(center[1]), int(center[0])), int(radius), (0, 0, 255), 2)
             vorticity_frames.append(vorticity_clipped)
+            
+            # visualize mask on ow_frames
+            ow_criterion_clipped = ow_criterion_clipped.astype(np.float32)
+            ow_criterion_clipped = (ow_criterion_clipped - ow_criterion_clipped.min()) / (ow_criterion_clipped.max() - ow_criterion_clipped.min())
+            ow_criterion_clipped = (ow_criterion_clipped * 255).astype(np.uint8)
+            ow_criterion_clipped[circle_mask] = 1
             ow_frames.append(ow_criterion_clipped)
+            
+
             
             center = center * flow_grid_spacing
             radius = radius * flow_grid_spacing
@@ -268,5 +281,5 @@ video_all = torch.tensor(frames_all).permute(0, 3, 1, 2)[None].half().to(device)
 pred_tracks_all = torch.cat(pred_tracks_all, axis=1)
 pred_visibility_all = torch.cat(pred_visibility_all, axis=1)
 # Original visualization
-vis = Visualizer(save_dir="./saved_videos", mode="optical_flow", pad_value=120, linewidth=3, tracks_leave_trace=-1)
+vis = Visualizer(save_dir="./saved_videos", mode="optical_flow", pad_value=120, linewidth=3, tracks_leave_trace=0) # change the last input to N to see trace for N steps, or to -1 for many steps
 vis.visualize(video_all, pred_tracks_all, pred_visibility_all)
